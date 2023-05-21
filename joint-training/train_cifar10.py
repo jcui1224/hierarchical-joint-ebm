@@ -185,7 +185,7 @@ def train_step(netG, netE, optG, optE, dl_train, logger, args, **kwargs):
 
     for i, x in enumerate(dl_train, 0):
         if i % log_iter == 0:
-            logger.info("=="*10 + f"ep: {kwargs['ep']} batch: [{i}/{len(dl_train)}] best_fid: {kwargs['fid_best']:.3f} best_fid_ep: {kwargs['fid_best_ep']}" + "=="*10)
+            logger.info("=="*10 + f"ep: {kwargs['ep']} batch: [{i}/{len(dl_train)}]" + "=="*10)
 
         train_flag()
 
@@ -254,14 +254,11 @@ def fit(netG, netE, dl_train, test_batch, args, logger):
     optG = [t.optim.Adam(netG[0].parameters(), lr=args['g1_lr']),
             t.optim.Adam(netG[1].parameters(), lr=args['g2_lr'])]
 
-    import math
-    fid_best = math.inf
-    fid_best_ep = 0
     to_range_0_1 = lambda x: (x + 1.) / 2. if args['normalize_data'] else x
 
     for ep in range(args['epochs']):
 
-        Broken = train_step(netG, netE, optG, optE, dl_train, logger, args, ep=ep, fid_best=fid_best, fid_best_ep=fid_best_ep)
+        Broken = train_step(netG, netE, optG, optE, dl_train, logger, args, ep=ep)
 
         if Broken:
             return
@@ -341,7 +338,7 @@ def parse_args():
     # General arguments
 
     parser.add_argument('--epochs', type=int, default=101)
-    parser.add_argument('--data_dir', type=str, default='/data4/jcui7/images/data/')
+    parser.add_argument('--data_dir', type=str, default='../data/')
     parser.add_argument('--batch_size', type=int, default=100)
 
     parser.add_argument('--e1_lr', type=float, default=2e-5)
@@ -369,8 +366,8 @@ def parse_args():
     parser.add_argument('--pz1gz2_ndf', type=int, default=200)
     parser.add_argument('--pz1gz2_layers', type=int, default=4)
 
-    parser.add_argument('--fid', type=bool, default=True)
-    parser.add_argument('--fid_stat_dir', type=str, default='/Tian-ds/jcui7/HugeData/fid_stats/cifar10/fid_stats_cifar10_train.npz')
+    parser.add_argument('--fid', type=bool, default=False)
+    parser.add_argument('--fid_stat_dir', type=str, default='../fid_stat/fid_stats_cifar10_train.npz')
     parser.add_argument('--n_metrics', type=int, default=5) #10
     parser.add_argument('--n_metrics_start', type=int, default=10)
 
