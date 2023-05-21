@@ -24,7 +24,7 @@ cifar10_config = {
     'enz1_layers': 3,
     'use_noise': 1,
 }
-
+# TEST GITHUB
 class Normal:
     def __init__(self, mu, log_sigma, device):
         self.device = device
