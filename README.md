@@ -5,7 +5,7 @@
 CUDA_VISIBLE_DEVICES=gpu0 python train_cifar10.py
 ```
 
-## Two-stage Training
+# Two-stage Training
 ```python
 # Require two 32G-V100
 CUDA_VISIBLE_DEVICES=gpu0, gpu1 python ebm_train.py
