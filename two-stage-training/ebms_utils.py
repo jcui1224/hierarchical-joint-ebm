@@ -7,6 +7,48 @@ import shutil
 import pickle
 import numpy as np
 import utils
+import torch.nn as nn
+from collections import OrderedDict
+
+class _netEzi(nn.Module):
+
+    def __init__(self, z_shape, args):
+        super().__init__()
+        self.z_shape = z_shape
+        self.nef = args.nef
+        self.ndf = args.ndf
+        layers = {8: 1, 16: 2, 32: 3, 64: 4, 128: 5}
+
+        b, c, h, w = z_shape[0], z_shape[1], z_shape[2], z_shape[3]
+        num_layers = layers[h]
+
+        convlayers = OrderedDict()
+        current_dims = c
+        for i in range(num_layers):
+            convlayers['conv{}'.format(i+1)] = nn.Conv2d(current_dims, self.nef, 4, 2, 1)
+            convlayers['lrelu{}'.format(i+1)] = nn.LeakyReLU(0.2)
+            current_dims = self.nef
+        self.conv2d = nn.Sequential(convlayers)
+
+        linearlayers = OrderedDict()
+        current_dims = self.nef*4*4
+        num_layers = num_layers
+        for i in range(num_layers): # just try num layers, could be other.
+            linearlayers['fc{}'.format(i+1)] = nn.Linear(current_dims, self.ndf)
+            linearlayers['lrelu{}'.format(i+1)] = nn.LeakyReLU(0.2)
+            current_dims = self.ndf
+
+        linearlayers['out'] = nn.Linear(current_dims, 1)
+        self.linear = nn.Sequential(linearlayers)
+
+    def forward(self, z):
+        assert z.shape[1:] == self.z_shape[1:]
+        f = self.conv2d(z)
+        f = f.view(z.shape[0], self.nef*4*4)
+        en = self.linear(f)
+        return en.squeeze(1)
+
+
 # ========================= DDP utils =====================
 def gather(tensor, nprocs):
     tensor_gather = [torch.zeros_like(tensor) for _ in range(nprocs)]
@@ -63,7 +105,6 @@ def load_VAE(args, local_rank, logging):
     return VAE
 
 def build_EBM(VAE, args, local_rank, logging):
-    from ebms_net import netEzi as _netEzi
     with torch.no_grad():  # get a bunch of samples to know how many groups of latent variables are there
         _, z_list, _ = VAE.module.sample(args.batch_size, args.temperature)
 
@@ -88,7 +129,6 @@ def build_EBM(VAE, args, local_rank, logging):
     return ebm_list, opt_list
 
 def load_EBM(VAE, args, local_rank, logging):
-    from ebms_net import netEzi as _netEzi
     with torch.no_grad():  # get a bunch of samples to know how many groups of latent variables are there
         _, z_list, _ = VAE.module.sample(args.batch_size, args.temperature)
 
@@ -142,28 +182,9 @@ def overwrite_opt(opt, opt_override):
     return opt
 
 def load_config(args):
-    if args.backbone == 'CIFAR10_Gaussian_Decoder':
-        from ebms_config import CIFAR10_Gaussian_Decoder
-        args = overwrite_opt(args, CIFAR10_Gaussian_Decoder)
-    if args.backbone == 'Church64_Gaussian_Decoder':
-        from ebms_config import Church64_Gaussian_Decoder
-        args = overwrite_opt(args, Church64_Gaussian_Decoder)
     if args.backbone == 'CelebA256_LOGISTIC_Decoder':
         from ebms_config import CelebA256_LOGISTIC_Decoder
         args = overwrite_opt(args, CelebA256_LOGISTIC_Decoder)
-    return args
-
-def load_test_config(args):
-    if args.backbone == 'CIFAR10_Gaussian_Decoder':
-        from ebms_config import CIFAR10_Gaussian_Decoder_TEST
-        args = overwrite_opt(args, CIFAR10_Gaussian_Decoder_TEST)
-    if args.backbone == 'Church64_Gaussian_Decoder':
-        from ebms_config import Church64_Gaussian_Decoder_TEST
-        args = overwrite_opt(args, Church64_Gaussian_Decoder_TEST)
-    if args.backbone == 'CelebA256_LOGISTIC_Decoder':
-        from ebms_config import CelebA256_LOGISTIC_Decoder
-        args = overwrite_opt(args, CelebA256_LOGISTIC_Decoder)
-    args.ebm_checkpoint = f'./ebms_train/{args.nvae_ckpt}/{args.ebm_exp}/ckpt/{args.ebm_ckpt}'
     return args
 
 def get_output_dir(args, file, add_datetime=True):
@@ -177,9 +198,9 @@ def get_output_dir(args, file, add_datetime=True):
 
 def copy_source(args):
     base_dir = './'
-    file_list = ['datasets.py', 'distributions.py', 'ebms_config.py', 'ebms_train.py', 'ebms_utils.py', 'ebms_net.py',
+    file_list = ['datasets.py', 'distributions.py', 'ebms_config.py', 'ebms_train.py', 'ebms_utils.py',
                  'lmdb_datasets.py', 'model.py', 'neural_ar_operations.py', 'neural_operations.py',
-                 'utils.py', 'ebms_fid.py']
+                 'utils.py']
     target_dir = args.save + '/codes'
     os.makedirs(target_dir, exist_ok=True)
     for file in file_list:

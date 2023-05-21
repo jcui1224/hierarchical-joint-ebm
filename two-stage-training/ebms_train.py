@@ -1,6 +1,3 @@
-import sys
-sys.path.append("..")
-from pytorch_fid_jcui7.fid_score_imgs import compute_fid as get_fid
 import math
 import random
 import argparse
@@ -9,15 +6,6 @@ import torch.multiprocessing as mp
 from torchvision import utils as vutils
 import datasets
 from ebms_utils import *
-from tqdm import tqdm
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1,2,4,5"
-fid_size = {'celeba_256': 30000, 'cifar10': 50000, 'lsun_church_64': 50000,}
-fid_stats_dir = '/data4/jcui7/fid_stats/'
-fid_dir = {
-    'celeba_256': fid_stats_dir + 'celeba256/fid_stats_celeba256_train.npz',
-    'cifar10': fid_stats_dir + 'cifar10/fid_stats_cifar10_train.npz',
-    'lsun_church_64': fid_stats_dir + 'lsun/fid_stats_church64_train.npz',
-}
 
 def langevin_prior_samples(VAE, ebm_list, epz_list, args, noise_list, logging, display):
     sample_steps = args.ld_steps
@@ -55,41 +43,79 @@ def langevin_prior_samples(VAE, ebm_list, epz_list, args, noise_list, logging, d
     logits, neg_datas, _ = VAE.module.sample(batch_size, t, eps_z)
     return logits, neg_datas
 
-def compute_fid(VAE, ebm_list, local_rank, nprocs, logging, args):
+def train(VAE, ebm_list, opt_list, train_queue, local_rank, nprocs, logging, args):
 
     with torch.no_grad():  # get a bunch of samples to know how many groups of latent variables are there
         _, z_list, _ = VAE.module.sample(args.batch_size, args.temperature)
 
     noise_list = [torch.randn(zi.size()).cuda(local_rank) for zi in z_list]
 
-    size = fid_size[args.dataset]
-    fid_stats = fid_dir[args.dataset]
-    n_batch = int((size // args.batch_size) // nprocs)  # make sure it can divide
+    global_step = 0
 
-    if args.local_rank == 0:  # print rank 0 progress
-        count = tqdm(range(n_batch))
-    else:
-        count = range(n_batch)
+    while True:
 
-    global_idx = 0
-    img_dir = args.save + f'/fid_imgs/'
-    os.makedirs(img_dir, exist_ok=True)
+        train_queue.sampler.set_epoch(global_step)
 
-    for _ in count:
-        epz_list = init_z_requires_grad(z_list, args.local_rank)
-        logits, neg_datas = langevin_prior_samples(VAE, ebm_list, epz_list, args, noise_list, logging, display=False)
-        sample = VAE.module.decoder_output(logits).sample(args.temperature)
+        for b, x in enumerate(train_queue):
 
-        for img in sample:
-            vutils.save_image(img, img_dir + f'rank_{args.local_rank}_{global_idx}.png', nrow=1, normalize=True)
-            global_idx += 1
+            if global_step > args.max_iter:
+                logging.info("+++++ MAX ITER ++++++")
+                return
 
-    dist.barrier()
-    if args.local_rank == 0:
-        fid = get_fid(x_train=None, x_samples=img_dir, path=fid_stats, device='cuda:0')
-        return fid
-    else:
-        return math.inf
+            global_step += 1
+            x = x[0] if len(x) > 1 else x
+            x = x.cuda(local_rank)
+            train_flag(ebm_list)
+
+            if b % 100 == 0:  # could be useless
+                for ebm in ebm_list: utils.average_params(ebm.parameters(), True)
+
+            if b % args.log_iter == 0:
+                logging.info("===" * 15 + f'Iteration {global_step:>06d} Batch {b}/{len(train_queue)}' + "===" * 15)
+
+            posterior = VAE.module.get_posterior_samples(x)
+
+            epz_list = init_z_requires_grad(z_list, local_rank)
+            requires_grad(ebm_list, False)
+            logits, neg_datas = langevin_prior_samples(VAE, ebm_list, epz_list, args, noise_list, logging, display=(b % args.log_iter == 0))
+            requires_grad(ebm_list, True)
+
+            train_log = '||'
+            for i, (z_t, z_f, netE, opt) in enumerate(zip(posterior, neg_datas, ebm_list, opt_list)):
+                layer_idx = len(posterior) - i
+                netE.zero_grad()
+                ef = netE(z_f.detach()).mean()
+                et = netE(z_t.detach()).mean()
+                loss = (ef - et)
+
+                loss.backward()
+
+                dist.barrier()  # wait for syn gradient
+
+                ef_gather = [stop_condition(e) for e in gather(ef, nprocs=nprocs)]
+                et_gather = [stop_condition(e) for e in gather(et, nprocs=nprocs)]
+
+                if True in ef_gather or True in et_gather:
+                    print(f"local_rank: {local_rank} || z{layer_idx} ef: {ef}, et: {et}")
+                    return
+
+                utils.average_gradients(netE.parameters(), args.distributed)
+
+                opt.step()
+
+                train_log += f' et_z{layer_idx}: {et.item():15.2f} ef_z{layer_idx}: {ef.item():15.2f} ||'
+
+            if local_rank == 0 and b % args.log_iter == 0:
+                logging.info(train_log)
+
+                os.makedirs(args.save + f'/images/', exist_ok=True)
+                syn = VAE.module.decoder_output(logits).sample()
+                vutils.save_image(syn, args.save + f'/images/{global_step:>07d}.png', nrow=int(math.floor(math.sqrt(args.batch_size))), normalize=True)
+
+            if local_rank == 0 and b % args.log_iter == 0:
+                os.makedirs(args.save + f'/ckpt/', exist_ok=True)
+                save_ckpt(ebm_list, opt_list, args.save + f'/ckpt/{global_step}.pth', DDP=args.distributed)
+                keep_last_ckpt(args, num=20)
 
 def init_seeds(seed=0, cuda_deterministic=True):
     random.seed(seed)
@@ -108,7 +134,7 @@ def init_seeds(seed=0, cuda_deterministic=True):
 def main(local_rank, nprocs, args):
     # ==============================Prepare DDP ================================
     args.local_rank = local_rank
-    init_seeds(local_rank)
+    init_seeds(1)
     os.environ['MASTER_ADDR'] = args.master_address
     os.environ['MASTER_PORT'] = args.master_port
     torch.cuda.set_device(local_rank)
@@ -118,33 +144,29 @@ def main(local_rank, nprocs, args):
     logging.info(args)
 
     VAE = load_VAE(args, local_rank, logging)
-    ebm_list = load_EBM(VAE, args, local_rank, logging)
+    ebm_list, opt_list = build_EBM(VAE, args, local_rank, logging)
+    train_queue, _, num_classes = datasets.get_loaders(args)
 
-    fid = compute_fid(VAE, ebm_list, local_rank, nprocs, logging, args)
-
-    logging.info(f"FID : {fid}")
-
-    dist.barrier()
+    train(VAE, ebm_list, opt_list, train_queue, local_rank, nprocs, logging, args)
     dist.destroy_process_group()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Joint EBM Prior Model on NVAE Backbone PyTorch Training')
-    parser.add_argument("--backbone", type=str, default='Church64_Gaussian_Decoder')
-    parser.add_argument("--ebm_exp", type=str, default='2022-11-01-00-21-05')
-    parser.add_argument("--ebm_ckpt", type=str, default='15424.pth')
+    parser.add_argument("--backbone", type=str, default='CelebA256_LOGISTIC_Decoder')
+    parser.add_argument("--log_iter", type=int, default=10)
+
     # ================= DDP ===================
     parser.add_argument('--local_rank', default=-1, type=int, help='node rank for distributed training')
     parser.add_argument('--master_address', type=str, default='127.0.0.1', help='address for master')
     parser.add_argument('--master_port', type=str, default='6020', help='port for master')
-    parser.add_argument('--nprocs', type=int, default=4, help='port for master')
 
     args = parser.parse_args()
     args.distributed = True
 
-    args = load_test_config(args)
+    args = load_config(args)
+    args.nprocs = args.gpu_num
 
-    args.save = os.path.join(get_output_dir(args, __file__, add_datetime=False), f'{args.ebm_exp}')
-
+    args.save = get_output_dir(args, __file__, add_datetime=True)
     os.makedirs(args.save, exist_ok=True)
 
     copy_source(args)
