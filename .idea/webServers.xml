@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="WebServers">
+    <option name="servers">
+      <webServer id="8f99a407-b823-429f-80ac-6dc5af5ed5fc" name="v100_server">
+        <fileTransfer rootFolder="/data6/jcui7/Joint-EBM-Prior" accessType="SFTP" host="155.246.89.214" port="22" sshConfigId="5d3c2fc8-5e94-4493-8dc5-8b2f631130a7" sshConfig="old server">
+          <advancedOptions>
+            <advancedOptions dataProtectionLevel="Private" passiveMode="true" shareSSLContext="true" />
+          </advancedOptions>
+        </fileTransfer>
+      </webServer>
+    </option>
+  </component>
+</project>

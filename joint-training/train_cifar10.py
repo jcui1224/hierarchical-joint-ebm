@@ -2,29 +2,37 @@ import torch as t
 import torch.nn as nn
 import torch.backends.cudnn as cudnn
 from nets import _Cifar10_netG as _netG_pxgz1, _netEzi, _netGzi_mlp
-from dataset import get_dataset
-from torch_utils import *
-from os_utils import *
-from pygrid_utils import *
+from utils import *
 from torch.autograd import Variable
 import numpy as np
 import random
-import itertools
 import datetime
 import argparse
+import torchvision
+import torchvision.transforms as transforms
 
 cifar10_config = {
     'dataset': 'cifar10',
     'img_size': 32,
-    'normalize_data': 1,
-    'z1_dim': 128,
-    'qz1gx_nif': 64,
-    'pxgz1_ngf': 64,
-    'enz1_nef': 200,
-    'enz1_layers': 3,
-    'use_noise': 1,
+    'normalize_data': True,
 }
-# TEST GITHUB
+
+def get_dataset(args):
+    data_dir = args['data_dir']
+    img_size = args['img_size']
+    if args['dataset'] == 'cifar10':
+        if args['normalize_data']:
+            transform = transforms.Compose(
+                [transforms.Resize(img_size), transforms.ToTensor(),
+                 transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
+        else:
+            transform = transforms.Compose([transforms.Resize(img_size), transforms.ToTensor()])
+
+        ds_train = torchvision.datasets.CIFAR10(data_dir + 'cifar10', download=True, train=True, transform=transform)
+        ds_val = torchvision.datasets.CIFAR10(data_dir + 'cifar10', download=True, train=False, transform=transform)
+        input_shape = [3, img_size, img_size]
+        return ds_train, ds_val, input_shape
+
 class Normal:
     def __init__(self, mu, log_sigma, device):
         self.device = device
@@ -43,8 +51,6 @@ class Normal:
         log_p = - 0.5 * normalized_samples * normalized_samples - 0.5 * np.log(2 * np.pi) - t.log(self.sigma)
         return log_p
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "3"
-grid_log_init = {'Broken': 'False', 'Broken_epoch': 0, 'fid_best': 0., 'fid_best_ep': 0}
 mse = nn.MSELoss(reduction='none')
 
 def compute_log_px(netG, x, zs, args):
@@ -155,9 +161,7 @@ def recon_x(x, netG, netE, args, logger=None, display=False):
     x_mu = netG[0](z_g_k[0])
     return x_mu
 
-def train_step(netG, netE, optG, optE, dl_train, test_batch, logger, args, **kwargs):
-    device = args['device']
-    langevin_coff = 2 / (args['e_l_step_size'] ** 2)
+def train_step(netG, netE, optG, optE, dl_train, logger, args, **kwargs):
 
     def eval_flag():
         netG[0].eval()
@@ -176,7 +180,8 @@ def train_step(netG, netE, optG, optE, dl_train, test_batch, logger, args, **kwa
         requires_grad(netE, True)
 
     Broken = False
-    log_iter = int(len(dl_train) // 4) if len(dl_train) > 1000 else int(len(dl_train) // 2)
+    # log_iter = int(len(dl_train) // 4) if len(dl_train) > 1000 else int(len(dl_train) // 2)
+    log_iter = 1
 
     for i, x in enumerate(dl_train, 0):
         if i % log_iter == 0:
@@ -256,10 +261,10 @@ def fit(netG, netE, dl_train, test_batch, args, logger):
 
     for ep in range(args['epochs']):
 
-        Broken = train_step(netG, netE, optG, optE, dl_train, test_batch, logger, args, ep=ep, fid_best=fid_best, fid_best_ep=fid_best_ep)
+        Broken = train_step(netG, netE, optG, optE, dl_train, logger, args, ep=ep, fid_best=fid_best, fid_best_ep=fid_best_ep)
 
         if Broken:
-            return ['True', ep, fid_best, fid_best_ep]
+            return
 
         if ep % args['vis_iter'] == 0:
             imgs_dir = args['dir'] + 'imgs/'
@@ -270,53 +275,27 @@ def fit(netG, netE, dl_train, test_batch, args, logger):
             syn_mu = sample_x(args['batch_size'], netG, netE, args, logger=logger, display=False)
             show_single_batch(syn_mu, imgs_dir + f'{ep:>07d}_syn.png', nrow=10)
 
-        if args['fid'] and ep >= args['n_metrics_start'] and ep % args['n_metrics'] == 0:
-            from pytorch_fid_jcui7.fid_score import compute_fid
-            from tqdm import tqdm
-            try:
-                s = []
-                for _ in tqdm(range(int(50000 / args['batch_size']))):
-                    syn = sample_x(args['batch_size'], netG, netE, args, logger=logger, display=False)
-                    syn = to_range_0_1(syn).clamp(min=0., max=1.)
-                    s.append(syn)
-                s = t.cat(s)
-                fid = compute_fid(x_train=None, x_samples=s, path='/Tian-ds/jcui7/HugeData/fid_stats/cifar10/fid_stats_cifar10_train.npz')
-                logger.info('fid: {:.5f}'.format(fid))
+        if args['fid']:
+            if ep >= args['n_metrics_start'] and ep % args['n_metrics'] == 0:
+                from pytorch_fid_jcui7.fid_score import compute_fid
+                from tqdm import tqdm
+                try:
+                    s = []
+                    for _ in tqdm(range(int(50000 / args['batch_size']))):
+                        syn = sample_x(args['batch_size'], netG, netE, args, logger=logger, display=False)
+                        syn = to_range_0_1(syn).clamp(min=0., max=1.)
+                        s.append(syn)
+                    s = t.cat(s)
+                    fid = compute_fid(x_train=None, x_samples=s, path=args['fid_stat_dir'])
+                    logger.info('fid: {:.5f}'.format(fid))
 
-                if fid < fid_best:
-                    fid_best = fid
-                    fid_best_ep = ep
-                    os.makedirs(args['dir']+'/ckpt', exist_ok=True)
-                    save_dict = {
-                        'epoch': ep,
-                        'netGz1': netG[0].state_dict(),
-                        'netGz2': netG[1].state_dict(),
-                        'netEz1': netE[0].state_dict(),
-                        'netEz2': netE[1].state_dict(),
-                        'optGz1': optG[0].state_dict(),
-                        'optGz2': optG[1].state_dict(),
-                        'optEz1': optE[0].state_dict(),
-                        'optEz2': optE[1].state_dict(),
-                    }
-                    t.save(save_dict, '{}/EBM_{:.4f}.pth'.format(args['dir']+'/ckpt', fid))
+                except Exception as e:
+                    print(e)
+                    logger.critical(e, exc_info=True)
+                    logger.info('FID failed')
+    return
 
-            except Exception as e:
-                print(e)
-                logger.critical(e, exc_info=True)
-                logger.info('FID failed')
-
-        if args['fid'] and fid_best > 200 and ep >= args['n_metrics_start']:
-            return ['True', ep, fid_best, fid_best_ep]
-
-        if args['fid'] and fid_best > 80 and ep >= 50:
-            return ['True', ep, fid_best, fid_best_ep]
-
-        if args['fid'] and fid_best > 70 and ep >= 70:
-            return ['True', ep, fid_best, fid_best_ep]
-
-    return ['False', args['epochs'], fid_best, fid_best_ep]
-
-def letgo(args_job, output_dir, return_dict):
+def letgo(args_job, output_dir):
     set_seeds(1224)
     args = parse_args()
     args = overwrite_opt(args, args_job)
@@ -333,9 +312,8 @@ def letgo(args_job, output_dir, return_dict):
 
     save_args(args, output_dir)
 
-    ds_train, ds_val, input_shape = get_dataset(args)
+    ds_train, _, input_shape = get_dataset(args)
     dl_train = t.utils.data.DataLoader(ds_train, batch_size=args['batch_size'], shuffle=True, num_workers=0, drop_last=True)
-    dl_val = t.utils.data.DataLoader(ds_val, batch_size=args['batch_size'], shuffle=True, num_workers=0, drop_last=True)
     args['input_shape'] = input_shape
     logger.info("Training samples %d" % len(ds_train))
 
@@ -355,63 +333,15 @@ def letgo(args_job, output_dir, return_dict):
 
     print(f"netE has {count_parameters_in_M(enz1)+count_parameters_in_M(enz2)}M")
 
-    return_list = fit(netG, netE, dl_train, test_batch, args, logger)
-
-    log_stat = {}
-    for grid_log_key, return_value in zip(grid_log_init.keys(), return_list):
-        log_stat[grid_log_key] = return_value
-    return_dict['stats'] = log_stat
+    fit(netG, netE, dl_train, test_batch, args, logger)
     return
-
-def update_job_result(job_opt, job_stats):
-    # TODO add your result metric here
-    for grid in grid_log_init.keys():
-        job_opt[grid] = job_stats[grid]
-        job_opt[grid] = job_stats[grid]
-
-def create_args_grid():
-    # TODO add your enumeration of parameters here
-    args_dict = {
-        # 'batch_size': [100],
-        # 'e_l_step_size': [0.4],
-        # 'sigma': [0.1, 0.3],
-        # 'g2_lr': [1e-5],
-        # 'e1_lr': [1e-5],
-        # 'e2_lr': [1e-5],
-        #
-        # 'e_l_steps': [40, 60],
-        #
-        # 'g_l_steps': [40],
-        # 'g_l_step_size': [0.1],
-        #
-        # 'enz2_layers': [3],
-        # 'enz2_nef': [100],
-        # 'pz1gz2_layers': [3],
-        # 'pz1gz2_ndf': [100],
-
-    }
-
-    args_list = list(args_dict.values())
-
-    opt_list = []
-
-    for i, args in enumerate(itertools.product(*args_list)):
-        opt_job = {'job_id': int(i), 'status': 'open'}
-
-        v = [args[i] for i in range(len(args_list))]
-        k = args_dict.keys()
-        opt_args = dict(zip(k, v))
-        opt_args.update({'e2_lr': opt_args['e1_lr'],})
-        # TODO add your result metric here
-        opt_result = grid_log_init
-        opt_list += [merge_dicts(opt_job, opt_args, opt_result)]
-
-    return opt_list
 
 def parse_args():
     parser = argparse.ArgumentParser()
     # General arguments
+
     parser.add_argument('--epochs', type=int, default=101)
+    parser.add_argument('--data_dir', type=str, default='/data4/jcui7/images/data/')
     parser.add_argument('--batch_size', type=int, default=100)
 
     parser.add_argument('--e1_lr', type=float, default=2e-5)
@@ -419,22 +349,28 @@ def parse_args():
     parser.add_argument('--g1_lr', type=float, default=1e-4)
     parser.add_argument('--g2_lr', type=float, default=1e-4)
 
+    parser.add_argument('--z1_dim', type=int, default=128)
     parser.add_argument('--z2_dim', type=int, default=100)
 
     parser.add_argument('--sigma', type=float, default=0.3)
 
+    parser.add_argument('--use_noise', type=bool, default=True)
     parser.add_argument('--e_l_steps', type=int, default=60)
     parser.add_argument('--e_l_step_size', type=float, default=0.4)
     parser.add_argument('--g_l_steps', type=int, default=40)
     parser.add_argument('--g_l_step_size', type=float, default=0.1)
 
+    parser.add_argument('--enz1_nef', type=int, default=200)
+    parser.add_argument('--enz1_layers', type=int, default=3)
     parser.add_argument('--enz2_nef', type=int, default=100)
     parser.add_argument('--enz2_layers', type=int, default=2)
 
+    parser.add_argument('--pxgz1_ngf', type=int, default=64)
     parser.add_argument('--pz1gz2_ndf', type=int, default=200)
     parser.add_argument('--pz1gz2_layers', type=int, default=4)
 
-    parser.add_argument('--fid', type=int, default=1)
+    parser.add_argument('--fid', type=bool, default=True)
+    parser.add_argument('--fid_stat_dir', type=str, default='/Tian-ds/jcui7/HugeData/fid_stats/cifar10/fid_stats_cifar10_train.npz')
     parser.add_argument('--n_metrics', type=int, default=5) #10
     parser.add_argument('--n_metrics_start', type=int, default=10)
 
@@ -465,10 +401,6 @@ def set_seeds(seed=0, cuda_deterministic=True):
         cudnn.benchmark = True
 
 def main():
-    gpus_num = 4
-    process_num = 2
-    use_pygrid = False
-
     output_dir = './{}/'.format(os.path.splitext(os.path.basename(__file__))[0])
     t = datetime.datetime.now().strftime('%Y-%m-%d-%H-%M-%S')
 
@@ -476,41 +408,10 @@ def main():
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(output_dir + 'code/', exist_ok=True)
 
-    [save_file(output_dir, f) for f in
-    ['config.py', 'dataset.py', 'nets.py', 'os_utils.py', 'pygrid.py', 'pygrid_utils.py', 'torch_utils.py', 'distribution.py',
-     'cifar10_mcmc_2layers.py']]
+    [save_file(output_dir, f) for f in ['nets.py', 'utils.py', os.path.basename(__file__)]]
 
-    if use_pygrid:
-        import pygrid
-        device_ids = [i for i in range(gpus_num)] * process_num
-        workers = len(device_ids)
-
-        # set devices
-        pygrid.init_mp()
-        pygrid.fill_queue(device_ids)
-
-        # set opts
-        get_opts_filename = lambda exp: output_dir + '{}.csv'.format(exp)
-        exp_id = pygrid.get_exp_id(__file__)
-
-        write_opts = lambda opts: pygrid.write_opts(opts, lambda: open(get_opts_filename(exp_id), mode='w', newline=''))
-        read_opts = lambda: pygrid.read_opts(lambda: open(get_opts_filename(exp_id), mode='r'))
-
-        if not os.path.exists(get_opts_filename(exp_id)):
-            write_opts(create_args_grid())
-        write_opts(pygrid.reset_job_status(read_opts()))
-
-        # set logging
-        logger = Logger(output_dir, 'main')
-        logger.info(f'available devices {device_ids}')
-
-        # run
-        pygrid.run_jobs(logger, exp_id, output_dir, workers, letgo, read_opts, write_opts, update_job_result)
-        logger.info('done')
-
-    else:
-        opt = dict()
-        letgo(opt, output_dir, {})
+    opt = dict()
+    letgo(opt, output_dir)
 
 if __name__ == '__main__':
     main()
