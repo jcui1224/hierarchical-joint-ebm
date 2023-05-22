@@ -6,7 +6,7 @@ CUDA_VISIBLE_DEVICES=gpu0 python train_cifar10.py
 ```
 ### Compute FID
 ```python
-CUDA_VISIBLE_DEVICES=gpu0 python task_fid.py --model-dir={your_path}/yyyy-mm-dd-hh-mm-ss/ --model_ckpt=xxx.pth
+CUDA_VISIBLE_DEVICES=gpu0 python task_fid.py --model_dir={your path}/yyyy-mm-dd-hh-mm-ss/ --model_ckpt=xxx.pth
 ```
 Checkpoint is relaseed. 
 
